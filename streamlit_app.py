@@ -93,15 +93,20 @@ if st.session_state.interview_started and not st.session_state.interview_ended:
 elif st.session_state.interview_ended:
     st.header("📊 Interview Feedback")
     
-    with st.spinner("Generating comprehensive feedback..."):
-        feedback = generate_feedback(st.session_state.session_id)
-        st.markdown(feedback)
+    # Only generate feedback once and cache it
+    if 'feedback' not in st.session_state:
+        with st.spinner("Generating comprehensive feedback..."):
+            st.session_state.feedback = generate_feedback(st.session_state.session_id)
+    
+    st.markdown(st.session_state.feedback)
     
     if st.button("Start New Interview"):
+        # Clear ALL session state including feedback
         st.session_state.interview_started = False
         st.session_state.session_id = None
         st.session_state.messages = []
         st.session_state.interview_ended = False
+        st.session_state.feedback = None  # Clear cached feedback
         st.rerun()
 
 else:
