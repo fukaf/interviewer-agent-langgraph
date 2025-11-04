@@ -1,11 +1,12 @@
 """
-Multi-Agent Interview System with LLM Integration
-================================================
-Integrated agents with actual LLM calls and token tracking
+Multi-Agent Interview System with LangGraph Interrupts
+======================================================
+Uses LangGraph interrupt/resume for Human-in-the-Loop interactions
 """
 
 from typing import TypedDict, Literal, Dict, Any
 from langgraph.graph import StateGraph, END, START
+from langgraph.checkpoint.memory import MemorySaver
 from langchain_openai import ChatOpenAI, AzureChatOpenAI
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import SystemMessage, HumanMessage
@@ -646,23 +647,22 @@ def move_to_next_topic(state: InterviewState) -> InterviewState:
     return state
 
 
-def wait_for_user_input(state: InterviewState) -> InterviewState:
+def human_input_node(state: InterviewState) -> InterviewState:
     """
-    Dedicated wait node that pauses graph execution for user input.
-    All question-generating agents (topic, judge, probing) route here.
-    Sets the waiting flag and graph ends at this node.
-    When user provides input, graph resumes from here to security_agent.
+    Human-in-the-Loop (HITL) node that pauses graph execution for user input.
+    
+    This node:
+    1. Gets called after question-generating agents (topic, judge, probing)
+    2. Triggers an interrupt - graph pauses here
+    3. Streamlit detects interrupt and waits for user input via chat_input
+    4. When user provides input, Streamlit resumes the graph
+    5. Graph continues from here to security_agent
+    
+    The interrupt is the key - it's LangGraph's built-in way to pause and resume.
     """
-    state["waiting_for_user_input"] = True
+    # This node doesn't modify state, it just serves as an interrupt point
+    # The interrupt happens automatically when this node is marked for interruption
     return state
-
-
-def route_from_wait_node(state: InterviewState) -> Literal["security_agent"]:
-    """
-    After user provides input, always route to security_agent for validation.
-    This is called when graph resumes after wait_for_user_input node.
-    """
-    return "security_agent"
 
 
 def check_user_input_needed(state: InterviewState) -> Literal["wait", "continue"]:
@@ -739,20 +739,6 @@ Keep it professional, constructive, and concise."""
 # ROUTING FUNCTIONS
 # ============================================================================
 
-def route_start(state: InterviewState) -> Literal["topic_agent", "security_agent", "feedback_agent"]:
-    """Route from START based on whether we have user input to process"""
-    # If interview is marked as complete, go directly to feedback
-    if state.get("interview_complete"):
-        return "feedback_agent"
-    
-    # If there's a user answer to process, go to security_agent
-    # Otherwise, go to topic_agent to generate a question
-    if state.get("user_answer") and state["user_answer"].strip():
-        return "security_agent"
-    else:
-        return "topic_agent"
-
-
 def route_after_security(state: InterviewState) -> Literal["judge", "topic_guide"]:
     """Route based on security check results"""
     result = "topic_guide" if state["security_passed"] else "judge"
@@ -768,12 +754,12 @@ def route_after_security(state: InterviewState) -> Literal["judge", "topic_guide
     return result
 
 
-def route_after_judge(state: InterviewState) -> Literal["wait_for_user_input", "topic_guide"]:
+def route_after_judge(state: InterviewState) -> Literal["human_input_node", "topic_guide"]:
     """Route from judge based on whether we should wait for retry or move on"""
     # If waiting_for_user_input is False, judge gave up - go to topic_guide
-    # If True, judge wants user to retry - go to wait node
+    # If True, judge wants user to retry - go to HITL (interrupt)
     if state.get("waiting_for_user_input", True):
-        return "wait_for_user_input"
+        return "human_input_node"
     else:
         # Judge gave up, move to topic_guide to continue
         return "topic_guide"
@@ -813,103 +799,100 @@ def route_after_topic_guide(state: InterviewState) -> Literal["topic_agent", "pr
 # ============================================================================
 
 def create_interview_graph():
-    """Construct the multi-agent interview workflow graph
+    """Construct the multi-agent interview workflow graph with HITL interrupts
     
-    Graph Flow:
+    Graph Flow (with Human-in-the-Loop using interrupts):
     
     START 
-      ├─> route_start(has user_answer?)
-      │   ├─ YES → security_agent ─┬─> route_after_security(passed?)
-      │   │                         │   ├─ YES → topic_guide ─┬─> route_after_topic_guide(depth sufficient?)
-      │   │                         │   │                      │   ├─ Sufficient → next_topic → topic_agent → wait_for_user_input → END
-      │   │                         │   │                      │   └─ Needs more → probing_agent → wait_for_user_input → END
-      │   │                         │   └─ NO → judge → wait_for_user_input → END
-      │   │
-      │   └─ NO → topic_agent → wait_for_user_input → END
-      │
-      └─> (User submits answer, graph re-invokes with user_answer, goes to security_agent)
-    
-    Special Case:
-      - If all topics complete → feedback_agent → END (true termination)
+      └─> topic_agent (generates first question)
+            └─> HITL (interrupt - waits for user)
+                  └─> security_agent (validates answer)
+                        ├─ Failed → judge_agent (provides feedback)
+                        │            └─> HITL (interrupt - waits for retry)
+                        │                  └─> security_agent (validates retry)
+                        │
+                        └─ Passed → topic_guide (evaluates depth)
+                                      ├─ Not deep → probing_agent (follow-up)
+                                      │              └─> HITL (interrupt)
+                                      │                    └─> security_agent
+                                      │
+                                      ├─ Deep enough → next_topic → topic_agent → HITL
+                                      │
+                                      └─ All done → feedback_agent → END
     
     Key Points:
-    - wait_for_user_input is a dedicated node that collects all questions
-    - All question-generating agents (topic, judge, probing) → wait_for_user_input → END
-    - END only means "pause for input" when coming from wait_for_user_input
-    - END means "true termination" only when coming from feedback_agent
-    - route_start() checks user_answer to decide: security_agent or topic_agent
-    - All question-generating agents (topic, judge, probing) → wait_for_user_input node
-    - wait_for_user_input sets flag and graph ends (pauses)
-    - When user submits answer, Streamlit re-invokes graph with user_answer
-    - Graph processes answer through security → topic_guide/judge path
-    - Cycle continues until interview_complete
+    - HITL node is marked with interrupt_before=["human_input_node"]
+    - When graph reaches HITL, it pauses (interrupt)
+    - Streamlit's chat_input handles user input
+    - Streamlit calls graph.stream(..., config) to resume from HITL
+    - Graph continues: HITL → security_agent → ...
+    - This maintains graph context, no need to restart from START
     """
+    
+    # Create workflow with checkpointer for interrupt/resume
     workflow = StateGraph(InterviewState)
     
-    # Add nodes including dedicated wait node
+    # Add all agent nodes
     workflow.add_node("topic_agent", topic_agent)
     workflow.add_node("security_agent", security_agent)
     workflow.add_node("judge", judge_agent)
     workflow.add_node("topic_guide", topic_guide)
     workflow.add_node("probing_agent", probing_agent)
     workflow.add_node("next_topic", move_to_next_topic)
-    workflow.add_node("wait_for_user_input", wait_for_user_input)
+    workflow.add_node("human_input_node", human_input_node)  # HITL node
     workflow.add_node("feedback_agent", feedback_agent)
     
-    # Add conditional entry point
-    # This allows the graph to start from different nodes based on state
-    workflow.add_conditional_edges(
-        START,
-        route_start,
-        {
-            "topic_agent": "topic_agent",
-            "security_agent": "security_agent",
-            "feedback_agent": "feedback_agent"
-        }
-    )
+    # Start with topic_agent (first question)
+    workflow.add_edge(START, "topic_agent")
     
-    # All question-generating agents route to wait node (not END)
-    workflow.add_edge("topic_agent", "wait_for_user_input")
-    workflow.add_edge("probing_agent", "wait_for_user_input")
+    # Question agents → HITL (interrupt point)
+    workflow.add_edge("topic_agent", "human_input_node")
+    workflow.add_edge("probing_agent", "human_input_node")
     
-    # Judge uses conditional routing - either wait for retry or move on
+    # Judge - conditional: either go to HITL for retry OR move on
     workflow.add_conditional_edges(
         "judge",
         route_after_judge,
         {
-            "wait_for_user_input": "wait_for_user_input",
-            "topic_guide": "topic_guide"
+            "ask_again": "human_input_node",  # User should retry
+            "max_retries": "topic_guide"  # Judge gave up, continue
         }
     )
     
-    # Wait node ends graph execution (pause for user input)
-    workflow.add_edge("wait_for_user_input", END)
+    # HITL → security_agent (after user provides input and graph resumes)
+    workflow.add_edge("human_input_node", "security_agent")
     
-    # When user provides answer, security_agent validates it
+    # Security validates answer
     workflow.add_conditional_edges(
         "security_agent",
         route_after_security,
         {
-            "judge": "judge",
-            "topic_guide": "topic_guide"
+            "failed": "judge",  # Failed validation
+            "passed": "topic_guide"  # Passed validation
         }
     )
     
-    # Topic guide evaluates answer depth and routes accordingly
+    # Topic guide evaluates depth
     workflow.add_conditional_edges(
         "topic_guide",
         route_after_topic_guide,
         {
-            "topic_agent": "next_topic",
-            "probing_agent": "probing_agent",
-            "end": "feedback_agent"
+            "next_topic": "next_topic",  # Move to next topic
+            "ask_deeper": "probing_agent",  # Need more depth
+            "end": "feedback_agent"  # All topics complete
         }
     )
     
-    # Next topic leads to topic agent (which then goes to wait node)
+    # Next topic preparation
     workflow.add_edge("next_topic", "topic_agent")
     
-    # Feedback agent is the only true END (interview complete)
+    # Feedback agent ends the interview
     workflow.add_edge("feedback_agent", END)
     
-    return workflow.compile()
+    # Compile with checkpointer and interrupt BEFORE human_input_node
+    # This makes the graph pause when reaching HITL
+    return workflow.compile(
+        checkpointer=MemorySaver(),
+        interrupt_before=["human_input_node"]
+    )
+

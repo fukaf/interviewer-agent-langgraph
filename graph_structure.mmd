@@ -1,0 +1,32 @@
+---
+config:
+  flowchart:
+    curve: linear
+---
+graph TD;
+	__start__([<p>__start__</p>]):::first
+	topic_agent(topic_agent)
+	security_agent(security_agent)
+	judge(judge)
+	topic_guide(topic_guide)
+	probing_agent(probing_agent)
+	next_topic(next_topic)
+	human_input_node(human_input_node<hr/><small><em>__interrupt = before</em></small>)
+	feedback_agent(feedback_agent)
+	__end__([<p>__end__</p>]):::last
+	__start__ --> topic_agent;
+	human_input_node --> security_agent;
+	judge -. &nbsp;ask_again&nbsp; .-> human_input_node;
+	judge -. &nbsp;max_retries&nbsp; .-> topic_guide;
+	next_topic --> topic_agent;
+	probing_agent --> human_input_node;
+	security_agent -. &nbsp;failed&nbsp; .-> judge;
+	security_agent -. &nbsp;passed&nbsp; .-> topic_guide;
+	topic_agent --> human_input_node;
+	topic_guide -. &nbsp;end&nbsp; .-> feedback_agent;
+	topic_guide -.-> next_topic;
+	topic_guide -. &nbsp;ask_deeper&nbsp; .-> probing_agent;
+	feedback_agent --> __end__;
+	classDef default fill:#f2f0ff,line-height:1.2
+	classDef first fill-opacity:0
+	classDef last fill:#bfb6fc

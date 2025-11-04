@@ -96,34 +96,34 @@ with st.sidebar:
                     "conversation_history": [],
                     "current_agent": "",
                     "total_tokens": 0,
-                    "last_message_tokens": 0
+                    "last_message_tokens": 0,
+                    "waiting_for_user_input": False  # Will be replaced by interrupt mechanism
                 }
                 
-                # Create graph
+                # Create graph with checkpointer for interrupts
                 st.session_state.graph = create_interview_graph()
                 
-                # Initialize state values that aren't in TypedDict
-                st.session_state.state["waiting_for_user_input"] = False
+                # Thread config for checkpoint persistence
+                config = {"configurable": {"thread_id": st.session_state.session_id}}
                 
-                # Generate first question only (topic_agent)
-                # The graph will stop after topic_agent sets waiting_for_user_input=True
-                for output in st.session_state.graph.stream(st.session_state.state):
-                    # Update state with output
-                    for node_name, node_output in output.items():
+                # Start graph execution - it will run until hitting HITL (interrupt)
+                # The graph will: START → topic_agent → human_input_node (INTERRUPT)
+                for chunk in st.session_state.graph.stream(st.session_state.state, config):
+                    # Process each node output
+                    for node_name, node_output in chunk.items():
                         st.session_state.state.update(node_output)
-                        # Stop if we're waiting for user input
-                        if st.session_state.state.get("waiting_for_user_input"):
-                            break
-                    if st.session_state.state.get("waiting_for_user_input"):
-                        break
+                
+                # At this point, graph is interrupted at human_input_node
+                # The first question has been generated
                 
                 # Add first question to messages
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": st.session_state.state["current_question"],
-                    "agent": st.session_state.state["current_agent"],
-                    "tokens": st.session_state.state["last_message_tokens"]
-                })
+                if st.session_state.state.get("current_question"):
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": st.session_state.state["current_question"],
+                        "agent": st.session_state.state.get("current_agent", "Topic Agent"),
+                        "tokens": st.session_state.state.get("last_message_tokens", 0)
+                    })
                 
                 st.session_state.interview_started = True
                 st.session_state.waiting_for_user = True
@@ -158,18 +158,20 @@ with st.sidebar:
             
             try:
                 with st.spinner("Generating comprehensive feedback..."):
-                    # Mark interview as complete to trigger feedback agent  
+                    # Mark interview as complete
                     st.session_state.state["interview_complete"] = True
-                    st.session_state.state["user_answer"] = ""  # Clear to ensure route_start goes to feedback
-                    st.session_state.state["waiting_for_user_input"] = False  # Not waiting anymore
                     
                     # Log for debugging
                     if st.session_state.logger:
                         st.session_state.logger.text_logger.info("Button clicked: End Interview & Get Feedback")
-                        st.session_state.logger.text_logger.info(f"State before invoke: interview_complete={st.session_state.state.get('interview_complete')}")
                     
-                    # Invoke graph ONCE to run feedback_agent
-                    result = st.session_state.graph.invoke(st.session_state.state)
+                    # Thread config for checkpoint
+                    config = {"configurable": {"thread_id": st.session_state.session_id}}
+                    
+                    # Update state in graph with interview_complete flag
+                    # Then run through feedback path
+                    # Since we're at an interrupt, we need to update and continue
+                    result = st.session_state.graph.invoke(st.session_state.state, config)
                     
                     if st.session_state.logger:
                         st.session_state.logger.text_logger.info("Graph invoke completed successfully")
@@ -244,11 +246,6 @@ if st.session_state.interview_started and not st.session_state.interview_ended:
             # Already processed this input, skip silently
             st.stop()
         
-        # Check if we're actually waiting for user input
-        if not st.session_state.state.get("waiting_for_user_input", False):
-            # System not ready for input yet, skip silently
-            st.stop()
-        
         # Check if already processing
         if st.session_state.processing:
             # Already processing another input, skip silently
@@ -256,6 +253,7 @@ if st.session_state.interview_started and not st.session_state.interview_ended:
         
         # Mark as processing FIRST, before doing anything else
         st.session_state.processing = True
+        st.session_state.last_processed_input = user_input
         
         # Add user message to chat
         st.session_state.messages.append({
@@ -266,26 +264,35 @@ if st.session_state.interview_started and not st.session_state.interview_ended:
         with st.chat_message("user"):
             st.markdown(user_input)
         
-        # Update state with user answer and clear waiting flag
+        # Update state with user answer
         st.session_state.state["user_answer"] = user_input
-        st.session_state.state["waiting_for_user_input"] = False
         
-        # Let LangGraph engine run until it hits END (needs more gas/input)
+        # Thread config for checkpoint persistence
+        config = {"configurable": {"thread_id": st.session_state.session_id}}
+        
+        # Resume graph from interrupt with user input
+        # Graph continues: human_input_node → security_agent → ...
+        # Until it hits another interrupt (human_input_node again) or END (feedback_agent)
         with st.spinner("Agents processing..."):
-            # Start the engine with invoke() - it will run until END
-            result = st.session_state.graph.invoke(st.session_state.state)
+            # Resume from interrupt by calling invoke with None and config
+            # This tells LangGraph: "continue from where you left off"
+            for chunk in st.session_state.graph.stream(None, config):
+                # Process each node output
+                for node_name, node_output in chunk.items():
+                    st.session_state.state.update(node_output)
             
-            # Update state with final result from the graph
-            st.session_state.state = result
+            # Graph has either:
+            # 1. Reached another interrupt (human_input_node) - new question ready
+            # 2. Reached END (feedback_agent) - interview complete
             
-            # Display the question/feedback that was generated
-            if result.get("current_question"):
-                agent_name = result.get("current_agent", "Agent")
-                tokens = result.get("last_message_tokens", 0)
+            # Display the new question/feedback if generated
+            if st.session_state.state.get("current_question"):
+                agent_name = st.session_state.state.get("current_agent", "Agent")
+                tokens = st.session_state.state.get("last_message_tokens", 0)
                 
-                if result.get("interview_complete"):
+                if st.session_state.state.get("interview_complete"):
                     # Feedback agent - store for display on feedback page
-                    st.session_state.feedback = result["current_question"]
+                    st.session_state.feedback = st.session_state.state["current_question"]
                     st.session_state.feedback_tokens = tokens
                     st.session_state.interview_ended = True
                     
@@ -293,14 +300,14 @@ if st.session_state.interview_started and not st.session_state.interview_ended:
                     if st.session_state.logger:
                         total_questions = len([m for m in st.session_state.messages if m["role"] == "assistant"])
                         st.session_state.logger.log_interview_complete(
-                            result["current_topic_index"],
+                            st.session_state.state["current_topic_index"],
                             total_questions
                         )
                 else:
                     # Display question in chat (judge/probing/topic agent)
                     agent_message = {
                         "role": "assistant",
-                        "content": result["current_question"],
+                        "content": st.session_state.state["current_question"],
                         "agent": agent_name,
                         "tokens": tokens
                     }
@@ -312,7 +319,7 @@ if st.session_state.interview_started and not st.session_state.interview_ended:
                             st.caption(f"{agent_name}")
                         with col2:
                             st.caption(f"🪙 {tokens} tokens")
-                        st.markdown(result["current_question"])
+                        st.markdown(st.session_state.state["current_question"])
         
         # Reset processing flag
         st.session_state.processing = False
