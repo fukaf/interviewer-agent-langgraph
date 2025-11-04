@@ -23,16 +23,12 @@ if 'state' not in st.session_state:
     st.session_state.state = None
 if 'graph' not in st.session_state:
     st.session_state.graph = None
-if 'waiting_for_user' not in st.session_state:
-    st.session_state.waiting_for_user = False
 if 'logger' not in st.session_state:
     st.session_state.logger = None
 if 'last_processed_input' not in st.session_state:
     st.session_state.last_processed_input = None
 if 'processing' not in st.session_state:
     st.session_state.processing = False
-if 'input_key_counter' not in st.session_state:
-    st.session_state.input_key_counter = 0
 if 'feedback' not in st.session_state:
     st.session_state.feedback = None
 if 'feedback_tokens' not in st.session_state:
@@ -126,7 +122,6 @@ with st.sidebar:
                     })
                 
                 st.session_state.interview_started = True
-                st.session_state.waiting_for_user = True
                 st.rerun()
     
     else:
@@ -217,7 +212,6 @@ with st.sidebar:
             st.session_state.interview_ended = False
             st.session_state.state = None
             st.session_state.graph = None
-            st.session_state.waiting_for_user = False
             st.session_state.logger = None
             if 'feedback' in st.session_state:
                 del st.session_state.feedback
@@ -239,7 +233,7 @@ if st.session_state.interview_started and not st.session_state.interview_ended:
             st.markdown(message["content"])
     
     # Chat input
-    if user_input := st.chat_input("Type your answer here...", key=st.session_state.input_key_counter):
+    if user_input := st.chat_input("Type your answer here..."):
         
         # Prevent duplicate processing of the same input
         if st.session_state.last_processed_input == user_input:
@@ -323,7 +317,6 @@ if st.session_state.interview_started and not st.session_state.interview_ended:
         
         # Reset processing flag
         st.session_state.processing = False
-        st.session_state.input_key_counter += 1
         st.rerun()
 
 elif st.session_state.interview_ended:
@@ -408,7 +401,6 @@ elif st.session_state.interview_ended:
         st.session_state.interview_ended = False
         st.session_state.state = None
         st.session_state.graph = None
-        st.session_state.waiting_for_user = False
         st.session_state.logger = None
         if 'feedback' in st.session_state:
             del st.session_state.feedback

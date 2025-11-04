@@ -665,13 +665,6 @@ def human_input_node(state: InterviewState) -> InterviewState:
     return state
 
 
-def check_user_input_needed(state: InterviewState) -> Literal["wait", "continue"]:
-    """Check if we need to wait for user input"""
-    if state.get("waiting_for_user_input", False):
-        return "wait"
-    return "continue"
-
-
 def feedback_agent(state: InterviewState) -> InterviewState:
     """Feedback Agent: Provides comprehensive feedback"""
     state["current_agent"] = "📝 Feedback Agent"
@@ -854,8 +847,8 @@ def create_interview_graph():
         "judge",
         route_after_judge,
         {
-            "ask_again": "human_input_node",  # User should retry
-            "max_retries": "topic_guide"  # Judge gave up, continue
+            "human_input_node": "human_input_node",  # User should retry
+            "topic_guide": "topic_guide"  # Judge gave up, continue
         }
     )
     
@@ -867,8 +860,8 @@ def create_interview_graph():
         "security_agent",
         route_after_security,
         {
-            "failed": "judge",  # Failed validation
-            "passed": "topic_guide"  # Passed validation
+            "judge": "judge",  # Failed validation
+            "topic_guide": "topic_guide"  # Passed validation
         }
     )
     
@@ -878,7 +871,7 @@ def create_interview_graph():
         route_after_topic_guide,
         {
             "next_topic": "next_topic",  # Move to next topic
-            "ask_deeper": "probing_agent",  # Need more depth
+            "probing_agent": "probing_agent",  # Need more depth
             "end": "feedback_agent"  # All topics complete
         }
     )
