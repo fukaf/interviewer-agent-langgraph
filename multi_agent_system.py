@@ -762,6 +762,12 @@ def route_after_topic_guide(state: InterviewState) -> Literal["topic_agent", "pr
     """Route based on topic depth evaluation"""
     logger = get_logger()
     
+    # PRIORITY: If interview_complete flag is set (user clicked End Interview), go to feedback
+    if state.get("interview_complete", False):
+        if logger:
+            logger.log_routing_decision("topic_guide", "end", "Interview manually ended by user")
+        return "end"
+    
     if state["topic_iteration_count"] >= state["max_iterations_per_topic"]:
         if state["current_topic_index"] + 1 >= len(state["topics"]):
             if logger:
