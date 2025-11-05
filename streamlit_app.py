@@ -264,6 +264,12 @@ if st.session_state.interview_started and not st.session_state.interview_ended:
         # Thread config for checkpoint persistence
         config = {"configurable": {"thread_id": st.session_state.session_id}}
         
+        st.session_state.graph.update_state(
+            config,
+            {"user_answer": user_input},
+            as_node="human_input_node"  # Update as if human_input_node produced this
+        )
+        
         # Resume graph from interrupt with user input
         # Graph continues: human_input_node → security_agent → ...
         # Until it hits another interrupt (human_input_node again) or END (feedback_agent)
