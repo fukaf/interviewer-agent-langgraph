@@ -1,5 +1,11 @@
 streamlit==1.28.0
-langchain==0.1.0
-langchain-openai==0.0.2
-langgraph==0.0.10
+langchain==1.0.2
+langchain-openai==1.0.1
+langchain-google-genai==2.0.5
+langchain-core==1.0.1
+langgraph==1.0.1
+langgraph-checkpoint==3.0.0
 python-dotenv==1.0.0
+pandas
+pyvis==0.3.2
+pyyaml
