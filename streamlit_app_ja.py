@@ -1,7 +1,8 @@
 import streamlit as st
 from datetime import datetime
-from multi_agent_system import create_interview_graph, load_topics_from_csv
-from logger import InterviewLogger, set_logger, clear_logger, get_logger
+from core import create_interview_graph
+from core.utils import load_topics_from_csv
+from interview_logging.interview_logger import InterviewLogger, set_logger, clear_logger, get_logger
 import os
 
 # Streamlit UI
@@ -88,9 +89,9 @@ with st.sidebar:
             st.warning("⚠️ トピックファイルが見つかりません")
             topics = load_topics_from_csv(topics_file)
         
-        max_iterations = st.slider("トピックごとの最大フォローアップ数", 1, 5, 2)
-        max_judge_retries = st.slider("Judge Agentの最大再試行回数", 0, 5, 2, 
-                                       help="無効な回答に対してJudge Agentが再試行を求める回数。0に設定すると次の質問に直接スキップします。")
+        max_iterations = st.number_input("トピックごとの最大フォローアップ数", min_value=1, max_value=10, value=2, step=1)
+        max_judge_retries = st.number_input("Judge Agentの最大再試行回数", min_value=0, max_value=10, value=2, step=1,
+                                            help="無効な回答に対してJudge Agentが再試行を求める回数。0に設定すると次の質問に直接スキップします。")
         
         if st.button("面接を開始", type="primary"):
             with st.spinner("マルチエージェントシステムを初期化中..."):
