@@ -160,20 +160,24 @@ with st.sidebar:
                     if new_file_path.exists():
                         st.error(f"❌ File `{new_name}.yaml` already exists!")
                     else:
-                        # Save current prompts to new file
+                        # Copy the file with current memo
                         import shutil
                         shutil.copy(str(current_path), str(new_file_path))
                         
-                        # Load the new file
+                        # Load the new file and update memo if it was changed
                         pm.load_from_file(str(new_file_path))
+                        if memo_text != pm.get_memo():
+                            pm.prompts['memo'] = memo_text
+                            pm.memo = memo_text
+                            pm.save_prompts(pm.prompts)
                         
                         # Update session state
                         st.session_state.last_loaded_file = f"{new_name}.yaml"
                         st.session_state.current_file_name = new_name
-                        st.session_state.current_memo = pm.get_memo()
+                        st.session_state.current_memo = memo_text
                         
                         st.success(f"✅ Created copy as `{new_name}.yaml`")
-                        st.info("💡 Original file unchanged. Now editing the new copy.")
+                        st.info("💡 Original file unchanged. Now editing the new copy with current memo.")
                         st.rerun()
                 except Exception as e:
                     st.error(f"❌ Failed to rename: {str(e)}")
