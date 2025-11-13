@@ -29,7 +29,8 @@ Let me ask you about something else."""
             self.log_end(state, {
                 "action": "max_retries_reached",
                 "retry_count": current_retry_count,
-                "moving_on": True
+                "moving_on": True,
+                "question": judge_feedback
             })
             
             state["security_passed"] = True
@@ -70,7 +71,7 @@ Let me ask you about something else."""
         state["waiting_for_user_input"] = True
         
         self.log_end(state, {
-            "feedback": judge_feedback,
+            "question": judge_feedback,
             "retry_count": state["judge_retry_count"],
             "waiting_for_user_input": True
         })

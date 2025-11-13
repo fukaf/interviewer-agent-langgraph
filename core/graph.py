@@ -41,7 +41,7 @@ def route_after_judge(state: InterviewState) -> Literal["human_input_node", "top
         return "topic_guide"
 
 
-def route_after_topic_guide(state: InterviewState) -> Literal["topic_agent", "probing_agent", "end"]:
+def route_after_topic_guide(state: InterviewState) -> Literal["next_topic", "probing_agent", "end"]:
     """Route based on topic depth evaluation"""
     logger = get_logger()
     
@@ -59,8 +59,8 @@ def route_after_topic_guide(state: InterviewState) -> Literal["topic_agent", "pr
             return "end"
         else:
             if logger:
-                logger.log_routing_decision("topic_guide", "topic_agent", "Max iterations reached, moving to next topic")
-            return "topic_agent"
+                logger.log_routing_decision("topic_guide", "next_topic", "Max iterations reached, moving to next topic")
+            return "next_topic"
     
     # Check depth
     if state["topic_depth_sufficient"]:
@@ -70,8 +70,8 @@ def route_after_topic_guide(state: InterviewState) -> Literal["topic_agent", "pr
             return "end"
         else:
             if logger:
-                logger.log_routing_decision("topic_guide", "topic_agent", "Depth sufficient, moving to next topic")
-            return "topic_agent"
+                logger.log_routing_decision("topic_guide", "next_topic", "Depth sufficient, moving to next topic")
+            return "next_topic"
     else:
         if logger:
             logger.log_routing_decision("topic_guide", "probing_agent", "Depth insufficient, asking follow-up")

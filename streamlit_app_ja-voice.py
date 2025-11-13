@@ -1,9 +1,12 @@
 import streamlit as st
 from datetime import datetime
+from pathlib import Path
 from core import create_interview_graph
 from core.utils import load_topics_from_csv
 from interview_logging.interview_logger import InterviewLogger, set_logger, clear_logger, get_logger
+from management.prompt_manager import PromptManager, get_prompt_manager
 import os
+import pandas as pd
 from streamlit_extras.bottom_container import bottom
 
 
@@ -53,50 +56,97 @@ if 'pending_voice_input' not in st.session_state:
 with st.sidebar:
     st.header("面接設定")
     
+    # ユーザー名入力
+    st.subheader("👤 ユーザー情報")
+    username = st.text_input(
+        "ユーザー名",
+        value=st.session_state.get('username', ''),
+        placeholder="例: tanaka_taro",
+        help="ログファイルの識別に使用されます",
+        key="username_input"
+    )
+    
+    # セッション状態にユーザー名を保存
+    if username:
+        st.session_state.username = username
+    
+    st.divider()
+    
+    # プロンプトファイル選択
+    st.subheader("📝 プロンプト設定")
+    
+    pm = get_prompt_manager()
+    available_prompts = PromptManager.list_available_prompts()
+    
+    if available_prompts:
+        # 現在のファイルパスを取得
+        current_file = str(pm.config_path)
+        
+        # ファイル名のリストを作成
+        prompt_options = {p['file']: p for p in available_prompts}
+        prompt_files = list(prompt_options.keys())
+        
+        # 現在選択されているファイルのインデックスを取得
+        current_filename = Path(current_file).name
+        try:
+            current_index = prompt_files.index(current_filename)
+        except ValueError:
+            current_index = 0
+        
+        # セレクトボックスでファイル選択
+        selected_file = st.selectbox(
+            "プロンプトファイルを選択",
+            options=prompt_files,
+            index=current_index,
+            key="prompt_file_selector"
+        )
+        
+        # 選択されたプロンプトの情報を表示
+        selected_info = prompt_options[selected_file]
+        
+        # メモを表示
+        if selected_info['memo']:
+            st.info(f"**📌 説明**\n\n{selected_info['memo']}")
+        
+        # ファイルが変更された場合、プロンプトをリロード
+        if selected_file != current_filename:
+            try:
+                pm.load_from_file(selected_info['path'])
+                st.success(f"✅ プロンプトを **{selected_file}** に切り替えました")
+                st.rerun()  # 新しいプロンプトを反映するために再読み込み
+            except Exception as e:
+                st.error(f"❌ プロンプトの読み込みに失敗しました: {str(e)}")
+    else:
+        st.warning("⚠️ プロンプトフォルダにYAMLファイルが見つかりません")
+    
+    st.divider()
+    
     if not st.session_state.interview_started:
         # LLMプロバイダーの表示
         llm_provider = os.getenv("LLM_PROVIDER", "openai").upper()
         st.info(f"🤖 LLMプロバイダー: **{llm_provider}**")
         
-        # トピックの読み込みとプレビュー
-        topics_file = st.text_input("トピックCSVファイル", value="topics.csv")
+        # トピックファイルの選択
+        data_dir = Path("data")
+        if data_dir.exists():
+            available_files = sorted([f.name for f in data_dir.glob("*.csv")])
+            if available_files:
+                topics_file_name = st.selectbox(
+                    "トピックCSVファイルを選択",
+                    options=available_files,
+                    key="topics_file_selector"
+                )
+                topics_file = str(data_dir / topics_file_name)
+            else:
+                st.warning("⚠️ data/ フォルダにCSVファイルが見つかりません")
+                topics_file = "data/topics.csv"
+        else:
+            st.warning("⚠️ data/ フォルダが見つかりません")
+            topics_file = "data/topics.csv"
         
         if os.path.exists(topics_file):
             topics = load_topics_from_csv(topics_file)
             st.success(f"✅ {len(topics)}件のトピックを読み込みました")
-            
-            # テーマ別にトピックを整理
-            themes_dict = {}
-            for topic in topics:
-                theme = topic.get('theme', 'その他')
-                if theme not in themes_dict:
-                    themes_dict[theme] = []
-                themes_dict[theme].append(topic)
-            
-            # ツリービューの表示
-            with st.expander(f"📋 トピック構造 ({len(themes_dict)}テーマ)", expanded=False):
-                for theme_idx, theme in enumerate(sorted(themes_dict.keys()), 1):
-                    # 折りたたみ可能なテーマのチェックボックス
-                    show_theme = st.checkbox(f"🎯 {theme} ({len(themes_dict[theme])}トピック)", key=f"theme_{theme_idx}", value=False)
-                    
-                    if show_theme:
-                        for idx, topic in enumerate(themes_dict[theme], 1):
-                            # インデント付きのトピック名
-                            st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;**{idx}. {topic.get('topic', 'N/A')}**")
-                            
-                            # さらにインデントされた例示質問
-                            example_questions = topic.get('example_questions', [])
-                            if example_questions:
-                                for q_idx, question in enumerate(example_questions, 1):
-                                    st.caption(f"&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;• {question}")
-                            
-                            # トピック間のスペース
-                            if idx < len(themes_dict[theme]):
-                                st.write("")
-                    
-                    # テーマ間のスペース
-                    if theme_idx < len(themes_dict):
-                        st.write("")
         else:
             st.warning("⚠️ トピックファイルが見つかりません")
             topics = load_topics_from_csv(topics_file)
@@ -106,14 +156,25 @@ with st.sidebar:
                                             help="無効な回答に対してJudge Agentが再試行を求める回数。0に設定すると次の質問に直接スキップします。")
         
         if st.button("面接を開始", type="primary"):
+            # ユーザー名が入力されているか確認
+            if not st.session_state.get('username'):
+                st.error("⚠️ ユーザー名を入力してください")
+                st.stop()
+            
             with st.spinner("マルチエージェントシステムを初期化中..."):
-                # 一意のセッションIDを生成
-                st.session_state.session_id = f"interview_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                # ユーザー名をプレフィックスとして一意のセッションIDを生成
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                username_prefix = st.session_state.username.replace(' ', '_').replace('/', '_').replace('\\', '_')
+                st.session_state.session_id = f"{username_prefix}-{timestamp}"
                 
                 # ロガーの初期化
                 st.session_state.logger = InterviewLogger(st.session_state.session_id)
                 set_logger(st.session_state.logger)
                 st.session_state.logger.text_logger.info("Interview session initialized")
+                
+                # Log configuration files being used
+                st.session_state.logger.set_prompt_file(str(pm.config_path))
+                st.session_state.logger.set_topic_file(topics_file)
                 
                 # 状態の初期化
                 st.session_state.state = {
@@ -132,6 +193,7 @@ with st.sidebar:
                     "topic_feedback": "",
                     "interview_complete": False,
                     "conversation_history": [],
+                    "final_feedback": "",
                     "current_agent": "",
                     "total_tokens": 0,
                     "last_message_tokens": 0,
@@ -168,6 +230,10 @@ with st.sidebar:
     
     else:
         st.success("✅ 面接進行中")
+        
+        # ユーザー情報の表示
+        if st.session_state.get('username'):
+            st.info(f"👤 ユーザー: **{st.session_state.username}**")
         
         # 進捗状況の表示
         if st.session_state.state:
@@ -245,8 +311,8 @@ with st.sidebar:
                                     # feedback_agentに到達したかチェック
                                     if node_output.get("current_agent") == "Feedback Agent" or node_name == "feedback_agent":
                                         # すぐにフィードバックを抽出
-                                        if node_output.get("current_question"):
-                                            st.session_state.feedback = node_output["current_question"]
+                                        if node_output.get("final_feedback"):
+                                            st.session_state.feedback = node_output["final_feedback"]
                                             st.session_state.feedback_tokens = node_output.get("last_message_tokens", 0)
                                             # フィードバックをキャプチャしたらループを抜ける
                                             break
@@ -257,8 +323,8 @@ with st.sidebar:
                         # フィードバックが抽出されたか確認
                         if not st.session_state.get('feedback'):
                             # フォールバック: 最終状態から取得を試みる
-                            if st.session_state.state.get("current_question") and st.session_state.state.get("current_agent") in ["Feedback Agent", "📝 Feedback Agent"]:
-                                st.session_state.feedback = st.session_state.state["current_question"]
+                            if st.session_state.state.get("final_feedback"):
+                                st.session_state.feedback = st.session_state.state["final_feedback"]
                                 st.session_state.feedback_tokens = st.session_state.state.get("last_message_tokens", 0)
                             else:
                                 st.session_state.feedback = "フィードバック生成に失敗しました。ログを確認してください。"
@@ -571,45 +637,44 @@ if st.session_state.interview_started and not st.session_state.interview_ended:
             # 1. 次の中断（human_input_node） - 新しい質問の準備完了
             # 2. END（feedback_agent） - 面接完了
             
-            # 新しい質問/フィードバックが生成された場合は表示
-            if st.session_state.state.get("current_question"):
+            # 面接完了時はfinal_feedbackを確認
+            if st.session_state.state.get("interview_complete") and st.session_state.state.get("final_feedback"):
+                # Feedback agent - フィードバックページに表示するために保存
+                st.session_state.feedback = st.session_state.state["final_feedback"]
+                st.session_state.feedback_tokens = st.session_state.state.get("last_message_tokens", 0)
+                st.session_state.interview_ended = True
+                
+                # 面接完了のログ
+                if st.session_state.logger:
+                    total_questions = len([m for m in st.session_state.messages if m["role"] == "assistant"])
+                    st.session_state.logger.log_interview_complete(
+                        st.session_state.state["current_topic_index"],
+                        total_questions
+                    )
+            # 新しい質問が生成された場合は表示
+            elif st.session_state.state.get("current_question"):
                 agent_name = st.session_state.state.get("current_agent", "Agent")
                 tokens = st.session_state.state.get("last_message_tokens", 0)
+                # チャットに質問を表示（judge/probing/topic agent）
+                agent_message = {
+                    "role": "assistant",
+                    "content": st.session_state.state["current_question"],
+                    "agent": agent_name,
+                    "tokens": tokens,
+                    "execution_log": execution_log,  # メッセージと共に実行ログを保存
+                    "topic_index": st.session_state.state.get("current_topic_index", 0),
+                    "topic_iteration": st.session_state.state.get("topic_iteration_count", 0),
+                    "judge_retries": st.session_state.state.get("judge_retry_count", 0)
+                }
+                st.session_state.messages.append(agent_message)
                 
-                if st.session_state.state.get("interview_complete"):
-                    # Feedback agent - フィードバックページに表示するために保存
-                    st.session_state.feedback = st.session_state.state["current_question"]
-                    st.session_state.feedback_tokens = tokens
-                    st.session_state.interview_ended = True
-                    
-                    # 面接完了のログ
-                    if st.session_state.logger:
-                        total_questions = len([m for m in st.session_state.messages if m["role"] == "assistant"])
-                        st.session_state.logger.log_interview_complete(
-                            st.session_state.state["current_topic_index"],
-                            total_questions
-                        )
-                else:
-                    # チャットに質問を表示（judge/probing/topic agent）
-                    agent_message = {
-                        "role": "assistant",
-                        "content": st.session_state.state["current_question"],
-                        "agent": agent_name,
-                        "tokens": tokens,
-                        "execution_log": execution_log,  # メッセージと共に実行ログを保存
-                        "topic_index": st.session_state.state.get("current_topic_index", 0),
-                        "topic_iteration": st.session_state.state.get("topic_iteration_count", 0),
-                        "judge_retries": st.session_state.state.get("judge_retry_count", 0)
-                    }
-                    st.session_state.messages.append(agent_message)
-                    
-                    with st.chat_message("assistant"):
-                        col1, col2 = st.columns([3, 1])
-                        with col1:
-                            st.caption(f"{agent_name}")
-                        with col2:
-                            st.caption(f"🪙 {tokens} tokens")
-                        st.markdown(st.session_state.state["current_question"])
+                with st.chat_message("assistant"):
+                    col1, col2 = st.columns([3, 1])
+                    with col1:
+                        st.caption(f"{agent_name}")
+                    with col2:
+                        st.caption(f"🪙 {tokens} tokens")
+                    st.markdown(st.session_state.state["current_question"])
         
         # 処理中フラグをリセット
         st.session_state.processing = False
@@ -707,30 +772,135 @@ elif st.session_state.interview_ended:
 else:
     # ウェルカム画面
     st.markdown("""
-    ## 従業員知識評価面接へようこそ！ 👋
+    ## 💼 従業員知識評価面接システム
     
-    このアプリケーションは、企業知識に関する詳細な面接を実施する**マルチエージェントシステム**を使用しています。
-    
-    ### マルチエージェントシステム:
-    - 🎯 **Topic Agent**: 事前定義されたトピックから質問を生成
-    - 🔒 **Security Agent**: 回答の品質と関連性を検証
-    - ⚖️ **Judge Agent**: 不明瞭な回答にフィードバックを提供
-    - 📊 **Topic Guide**: 知識の深さを評価
-    - 🔍 **Probing Agent**: フォローアップ質問を実施
-    - 📝 **Feedback Agent**: 包括的な評価を提供
-    
-    ### 使い方:
-    1. **トピックCSVをアップロード**（またはデフォルトを使用）テーマと例示質問を含む
-    2. **面接を開始** - エージェントが会話をガイド
-    3. **質問に回答** - どのエージェントが応答しているか、トークン使用量を確認
-    4. **フィードバックを受け取る** - テーマ別の包括的な評価
-    
-    ### 機能:
-    - ✅ 各メッセージのエージェント識別
-    - ✅ リアルタイムトークン使用量追跡
-    - ✅ トピック全体の進捗追跡
-    - ✅ インテリジェントなフォローアップ質問
-    - ✅ テーマ別フィードバック
-    
-    **始める準備はできましたか？** サイドバーで面接を設定し、「面接を開始」をクリックしてください！
+    マルチエージェントによる対話型面接システムです。技術知識を段階的に評価し、詳細なフィードバックを提供します。
     """)
+    
+    st.divider()
+    
+    # 2カラムレイアウト
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("""
+        ### 📖 ページ構成
+        
+        #### **🏠 メインページ（このページ）**
+        サイドバーで設定を行い、面接を実施します：
+        - **ユーザー名**: ログファイルの識別用（必須）- 後でLog Viewerでフィルタリングする際に使用
+        - **プロンプト設定**: エージェントの動作を定義するYAMLファイルを選択（Graph Prompt Editorで作成したファイルを選択可能）
+        - **トピックファイル**: 面接で使用するCSVファイルを選択（Topic Editorで作成したファイルを選択可能）
+        - **フォローアップ数**: トピックごとに何回まで深掘りするか（1-10回）
+        - **再試行回数**: 不適切な回答に対して何回まで再回答を求めるか（0-10回）
+        - **音声入力対応**: 🎤ボタンでリアルタイム音声認識による回答が可能
+        
+        #### **📝 02_Graph Prompt Editor**
+        エージェントのプロンプトをカスタマイズ：
+        - **6つのエージェント**のプロンプトを個別に編集（Topic, Security, Judge, Topic Guide, Probing, Feedback）
+        - **テキストエリア**で直接編集し、変更内容をプレビュー
+        - **メモ機能**でプロンプトファイルの目的・変更履歴を記録
+        - **別名保存**で元のファイルを保護しながら新バージョンを作成
+        - **即座に反映**: 保存後、メインページのプロンプト選択で利用可能
+        
+        #### **📊 03_Graph Structure**
+        面接フローをビジュアルで理解：
+        - **Mermaidダイアグラム**でエージェントの実行順序を可視化
+        - **条件分岐**の仕組みを図で確認（例：Security失敗→Judge、Topic Guide不足→Probing）
+        - **Human-in-the-Loop（HITL）**の位置を把握
+        - **システム全体の流れ**を理解してからカスタマイズ作業に着手
+        """)
+    
+    with col2:
+        st.markdown("""
+        #### **🔍 04_Log Viewer**
+        過去の面接ログを詳細分析：
+        - **ユーザー名フィルタ**: 複数ユーザーの面接から特定ユーザーのみ抽出
+        - **セッション選択**: 日時とトピック数で識別
+        - **会話タイムライン**: 質問・回答を時系列で表示し、どのエージェントが発言したか確認
+        - **エージェント判定**: Security/Judge/Topic Guideの判定理由と詳細を確認
+        - **統計情報**: トークン使用量、所要時間、トピック進捗などを可視化
+        - **ログダウンロード**: テキスト形式またはJSON形式で保存可能
+        
+        #### **📋 05_Topic Editor**
+        面接トピックを柔軟に管理：
+        - **4つの編集モード**を切り替え可能（Table/Form/Preview/Raw CSV）
+        - **Table Editor**: スプレッドシート風にまとめて編集・行の追加削除
+        - **Form Editor**: 1件ずつ丁寧に追加（テーマ、トピック、例示質問）
+        - **Preview Mode**: テーマ別にグループ化して構造を確認
+        - **Raw CSV Editor**: 直接CSVテキストを編集（大量データのコピペに便利）
+        - **バリデーション**: 必須項目チェック、重複検出で品質を保証
+        - **別名保存**: 元のtopics.csvを上書きせず、新ファイルとして保存
+        
+        ---
+        
+        ### 🤖 エージェント構成
+        
+        - **🎯 Topic Agent**: トピックに基づく質問を生成
+        - **🔒 Security Agent**: 回答の品質・関連性を検証（短すぎる/無関係な回答を検出）
+        - **⚖️ Judge Agent**: 不十分な回答に改善を要求（最大再試行回数まで）
+        - **📊 Topic Guide**: 知識の深さを評価し、十分でなければProbing Agentへ
+        - **🔍 Probing Agent**: より深い理解を確認するフォローアップ質問を生成
+        - **📝 Feedback Agent**: 全体を通しての詳細な評価とアドバイスを提供
+        """)
+    
+    st.divider()
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("""
+        ### 🚀 使い方
+        
+        1. **サイドバーで設定**
+        - ユーザー名を入力（例：tanaka_taro）
+        - プロンプトファイルを選択（デフォルト推奨）
+        - トピックCSVファイルを選択
+        
+        2. **「面接を開始」をクリック**
+        - Topic Agentが最初の質問を生成
+        - テキストまたは音声で回答
+        
+        3. **対話を続ける**
+        - Security AgentとJudge Agentが回答を検証
+        - Topic Guideが知識の深さを評価
+        - Probing Agentがフォローアップ質問を実施
+        
+        4. **フィードバックを取得**
+        - 全トピック終了後、または途中終了ボタンで終了
+        - Feedback Agentがテーマ別の総合評価を生成
+        - ログファイルをダウンロード可能
+        
+        **👇 下のトピック一覧で面接内容を確認してから開始してください！**
+        """)
+    
+    # トピックファイルのプレビューを表示
+    with col2:
+        st.subheader("📋 トピック一覧プレビュー")
+        
+        data_dir = Path("data")
+        if data_dir.exists():
+            available_files = sorted([f.name for f in data_dir.glob("*.csv")])
+            if available_files:
+                # サイドバーで選択されたファイルを取得（セッション状態から）
+                selected_file = st.session_state.get('topics_file_selector')
+                
+                # セッション状態にない場合はデフォルトを使用
+                if not selected_file:
+                    selected_file = "topics.csv" if "topics.csv" in available_files else available_files[0]
+                
+                topics_preview_file = str(data_dir / selected_file)
+                
+                if os.path.exists(topics_preview_file):
+                    # CSVをDataFrameとして読み込み
+                    try:
+                        df = pd.read_csv(topics_preview_file)
+                        st.caption(f"表示中: `{selected_file}` ({len(df)} トピック)")
+                        st.dataframe(df, use_container_width=True, hide_index=True)
+                    except Exception as e:
+                        st.error(f"⚠️ ファイルの読み込みに失敗しました: {str(e)}")
+                else:
+                    st.warning(f"⚠️ ファイルが見つかりません: `{selected_file}`")
+            else:
+                st.warning("⚠️ data/ フォルダにCSVファイルが見つかりません")
+        else:
+            st.warning("⚠️ data/ フォルダが見つかりません")
+

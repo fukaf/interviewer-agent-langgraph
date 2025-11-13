@@ -5,12 +5,14 @@ import yaml
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Set
 import re
+from langchain_core.messages import HumanMessage, SystemMessage
 
 
 class PromptManager:
     def __init__(self, config_path: str = "prompts.yaml"):
         self.config_path = Path(config_path)
         self.prompts = self._load_prompts()
+        self.memo = self.prompts.pop('memo', '')  # Extract memo if exists
         
         # Define mapping from template variables to state keys
         # This allows flexible naming - template can use {question} and pull from state["current_question"]
@@ -21,12 +23,8 @@ class PromptManager:
             "theme": ["current_topic.theme", "theme"],
             "topic": ["current_topic.topic", "topic"],
             "example_questions": ["current_topic.example_questions", "example_questions"],
-            "prev_question": ["current_question", "previous_question"],
             "assessment": ["topic_feedback", "assessment"],
             "feedback": ["security_feedback", "feedback"],
-            "retry_msg": ["judge_retry_msg", "retry_msg"],
-            "themes_text": ["themes_summary", "themes_text"],
-            "conversation_text": ["conversation_summary", "conversation_text"],
         }
     
     def _load_prompts(self) -> Dict[str, Any]:
@@ -40,19 +38,64 @@ class PromptManager:
     def reload(self):
         """Reload prompts from file (useful after editing)"""
         self.prompts = self._load_prompts()
+        self.memo = self.prompts.pop('memo', '')
+    
+    def load_from_file(self, config_path: str):
+        """Load prompts from a different file
+        
+        Args:
+            config_path: Path to the new prompts file
+        """
+        self.config_path = Path(config_path)
+        self.reload()
+    
+    def get_memo(self) -> str:
+        """Get the memo/description for this prompt configuration"""
+        return self.memo
+    
+    @staticmethod
+    def list_available_prompts(prompts_dir: str = "prompts") -> list[dict]:
+        """List all available prompt files in the prompts directory
+        
+        Args:
+            prompts_dir: Directory containing prompt files
+            
+        Returns:
+            List of dicts with 'path', 'name', and 'memo' for each prompt file
+        """
+        prompts_path = Path(prompts_dir)
+        if not prompts_path.exists():
+            return []
+        
+        prompt_files = []
+        for yaml_file in prompts_path.glob("*.yaml"):
+            try:
+                with open(yaml_file, 'r', encoding='utf-8') as f:
+                    data = yaml.safe_load(f)
+                    memo = data.get('memo', 'No description available')
+                    
+                prompt_files.append({
+                    'path': str(yaml_file),
+                    'name': yaml_file.stem,
+                    'memo': memo,
+                    'file': yaml_file.name
+                })
+            except Exception as e:
+                # Skip files that can't be read
+                prompt_files.append({
+                    'path': str(yaml_file),
+                    'name': yaml_file.stem,
+                    'memo': f'Error reading file: {str(e)}',
+                    'file': yaml_file.name
+                })
+        
+        return sorted(prompt_files, key=lambda x: x['name'])
     
     def _extract_variables_from_template(self, template: str) -> Set[str]:
         """Extract all {variable} placeholders from template"""
         pattern = r'\{(\w+)\}'
         variables = set(re.findall(pattern, template))
         return variables
-    
-    def get_template_variables(self, agent_name: str) -> List[str]:
-        """Get list of variables required by this agent's template"""
-        agent_config = self.prompts.get(agent_name, {})
-        template = agent_config.get('template', '')
-        variables = self._extract_variables_from_template(template)
-        return sorted(list(variables))
     
     def _get_nested_value(self, obj: Any, path: str) -> Any:
         """Get value from nested dict/object using dot notation
@@ -160,76 +203,105 @@ class PromptManager:
         
         return special_vars
     
-    def get_prompt(self, agent_name: str, state: Optional[Dict[str, Any]] = None, 
-                   auto_fill: bool = True, **kwargs) -> str:
-        """Get formatted prompt for an agent with optional auto-fill
+    def _build_agent_messages(self, agent_config: Dict[str, Any], state: Optional[Dict[str, Any]] = None, **kwargs) -> List[Any]:
+        """Build System and Human messages for the agent
+        
+        System Message contains:
+        - Role (who you are)
+        - Task (what to do)
+        - Guidelines (how to do it)
+        - Additional Guidelines (constraints)
+        - Response Format (output format)
+        
+        Human Message contains:
+        - Input (dynamic context with variables filled)
         
         Args:
-            agent_name: Name of the agent (e.g., 'topic_agent')
-            state: State dict to auto-fill variables from (optional)
-            auto_fill: Whether to auto-fill missing variables from state
-            **kwargs: Explicit variables to use (override auto-fill)
+            agent_config: Agent configuration from prompts
+            state: Current state for variable filling
+            **kwargs: Additional variables to override
             
         Returns:
-            Formatted prompt string
-            
-        Raises:
-            ValueError: If required variables are missing and can't be auto-filled
+            List of [SystemMessage, HumanMessage]
         """
-        agent_config = self.prompts.get(agent_name, {})
-        template = agent_config.get('template', '')
+        # -----------------------------------------------------------
+        # 1. BUILD SYSTEM MESSAGE (Fixed Instructions & Constraints)
+        # -----------------------------------------------------------
+        system_sections = []
+
+        # 1.1. Role (Mandatory for System)
+        if 'role' in agent_config:
+            system_sections.append(f"\n# YOUR ROLE\n{agent_config['role']}\n")
+
+        # 1.2. Task (Fixed instruction)
+        if 'task' in agent_config:
+            system_sections.append(f"# TASK\n{agent_config['task']}\n")
+
+        # 1.3. Guidelines
+        if 'guidelines' in agent_config:
+            guidelines = agent_config['guidelines']
+            guidelines_text = '\n'.join(f"- {g}" for g in (guidelines if isinstance(guidelines, list) else [guidelines]))
+            system_sections.append(f"# GUIDELINES\n{guidelines_text}\n")
+
+        # 1.4. Additional Guidelines
+        if 'additional_guidelines' in agent_config:
+            add_guidelines = agent_config['additional_guidelines']
+            add_guidelines_text = '\n'.join(f"- {g}" for g in (add_guidelines if isinstance(add_guidelines, list) else [add_guidelines]))
+            system_sections.append(f"# ADDITIONAL GUIDELINES\n{add_guidelines_text}\n")
         
-        # Auto-detect what variables the template needs
-        template_vars = self._extract_variables_from_template(template)
+        # 1.5. Response Format (CRITICAL for System Message)
+        if 'response_format' in agent_config:
+            system_sections.append(f"# RESPONSE FORMAT\n{agent_config['response_format']}")
+            
+        system_prompt_content = '\n'.join(system_sections)
+        system_message = SystemMessage(content=system_prompt_content)
         
-        # Prepare variables
+        # -----------------------------------------------------------
+        # 2. BUILD HUMAN MESSAGE (Dynamic Data & Context)
+        # -----------------------------------------------------------
+        human_sections = []
+        
+        # 2.1. Input (Dynamic context)
+        if 'input' in agent_config:
+            input_items = agent_config['input']
+            input_text = '\n'.join(input_items) if isinstance(input_items, list) else input_items
+            
+            # Fill variables in input
+            input_text = self._fill_variables_in_text(input_text, state, **kwargs)
+            
+            human_sections.append(f"\n# INPUT CONTEXT\n{input_text}")
+            
+        human_prompt_content = '\n'.join(human_sections)
+        human_message = HumanMessage(content=human_prompt_content)
+
+        # -----------------------------------------------------------
+        # 3. RETURN MESSAGES IN ORDER
+        # -----------------------------------------------------------
+        return [system_message, human_message]
+    
+    def _fill_variables_in_text(self, text: str, state: Optional[Dict[str, Any]] = None, **kwargs) -> str:
+        """Fill {variables} in text with values from state"""
+        if not state:
+            return text
+        
+        # Extract variables
+        variables = self._extract_variables_from_template(text)
+        
+        # Prepare kwargs for formatting
         formatted_kwargs = kwargs.copy()
         
-        # Add special computed variables if state provided
-        if state and auto_fill:
-            special_vars = self._prepare_special_variables(state)
-            # Add special vars if not already in kwargs
-            for key, value in special_vars.items():
-                if key not in formatted_kwargs:
-                    formatted_kwargs[key] = value
+        # Add special variables
+        special_vars = self._prepare_special_variables(state)
+        for key, value in special_vars.items():
+            if key not in formatted_kwargs:
+                formatted_kwargs[key] = value
         
-        # Auto-fill missing variables from state
-        if state and auto_fill:
-            for var_name in template_vars:
-                if var_name not in formatted_kwargs:
-                    value = self._auto_fill_variable(var_name, state, kwargs)
-                    if value is not None:
-                        formatted_kwargs[var_name] = value
-        
-        # Check which variables are still missing
-        missing_vars = template_vars - set(formatted_kwargs.keys())
-        
-        if missing_vars:
-            # Try to get from config (guidelines, fail_criteria, etc.)
-            for var_name in list(missing_vars):
-                if var_name in agent_config:
-                    config_value = agent_config[var_name]
-                    if isinstance(config_value, list):
-                        formatted_kwargs[var_name] = self._format_list_variable(
-                            config_value, var_name
-                        )
-                        missing_vars.remove(var_name)
-                    else:
-                        formatted_kwargs[var_name] = config_value
-                        missing_vars.remove(var_name)
-        
-        # If still missing, raise error
-        if missing_vars:
-            available_in_state = []
-            if state:
-                available_in_state = list(state.keys())
-            
-            raise ValueError(
-                f"Missing required variables for {agent_name}: {', '.join(sorted(missing_vars))}\n"
-                f"Template needs: {', '.join(sorted(template_vars))}\n"
-                f"Provided explicitly: {', '.join(sorted(kwargs.keys()))}\n"
-                f"Available in state: {', '.join(available_in_state[:10])}..."
-            )
+        # Auto-fill from state
+        for var_name in variables:
+            if var_name not in formatted_kwargs:
+                value = self._auto_fill_variable(var_name, state, kwargs)
+                if value is not None:
+                    formatted_kwargs[var_name] = value
         
         # Format lists
         final_kwargs = {}
@@ -240,28 +312,48 @@ class PromptManager:
                 final_kwargs[key] = value
         
         try:
-            return template.format(**final_kwargs)
-        except KeyError as e:
-            raise ValueError(
-                f"Template formatting error for {agent_name}: missing variable {e}"
-            )
+            return text.format(**final_kwargs)
+        except KeyError:
+            # Return as-is if formatting fails
+            return text
     
-    def get_system_message(self, agent_name: str) -> str:
-        """Get system message for an agent"""
-        return self.prompts.get(agent_name, {}).get('system', '')
+    def get_messages(self, agent_name: str, state: Optional[Dict[str, Any]] = None, **kwargs) -> List[Any]:
+        """Get System and Human messages for an agent
+        
+        Args:
+            agent_name: Name of the agent (e.g., 'topic_agent')
+            state: State dict to auto-fill variables from (optional)
+            **kwargs: Explicit variables to use (override auto-fill)
+            
+        Returns:
+            List of [SystemMessage, HumanMessage]
+        """
+        agent_config = self.prompts.get(agent_name, {})
+        return self._build_agent_messages(agent_config, state, **kwargs)
     
     def get_agent_info(self, agent_name: str) -> Dict[str, Any]:
-        """Get agent metadata including auto-detected variables"""
+        """Get agent metadata including components"""
         agent_config = self.prompts.get(agent_name, {})
-        template = agent_config.get('template', '')
-        variables = self.get_template_variables(agent_name)
+        
+        # Extract variables from input section
+        input_text = ''
+        input_items = agent_config.get('input', [])
+        if isinstance(input_items, list):
+            input_text = '\n'.join(input_items)
+        else:
+            input_text = str(input_items)
+        
+        variables = self._extract_variables_from_template(input_text)
         
         return {
             'name': agent_config.get('name', agent_name),
             'description': agent_config.get('description', ''),
-            'system': agent_config.get('system', ''),
-            'variables': variables,
-            'template': template
+            'role': agent_config.get('role', ''),
+            'task': agent_config.get('task', ''),
+            'variables': sorted(list(variables)),
+            'has_guidelines': bool(agent_config.get('guidelines')),
+            'has_additional_guidelines': bool(agent_config.get('additional_guidelines')),
+            'has_response_format': bool(agent_config.get('response_format'))
         }
     
     def list_agents(self) -> list[str]:
@@ -308,8 +400,109 @@ class PromptManager:
         
         return result
     
+    def validate_agent_output_schema(self, agent_name: str) -> Dict[str, Any]:
+        """Validate that agent's output schema matches what the graph expects (unified structure)
+        
+        Args:
+            agent_name: Agent to validate
+            
+        Returns:
+            Validation results for output schema
+        """
+        agent_config = self.prompts.get(agent_name, {})
+        output_schema = agent_config.get('output_schema', {})
+        
+        issues = []
+        warnings = []
+        
+        if not output_schema:
+            return {
+                'is_valid': True,
+                'has_schema': False,
+                'warnings': ["No output_schema defined (optional but recommended)"]
+            }
+        
+        # Get response_format from unified structure
+        response_format = agent_config.get('response_format', '')
+        
+        # Check output type
+        output_type = output_schema.get('type', 'unknown')
+        valid_types = ['json', 'plain_text', 'markdown']
+        
+        if output_type not in valid_types:
+            issues.append(f"Invalid output type '{output_type}'. Must be one of: {', '.join(valid_types)}")
+        
+        # Check required fields for JSON output
+        if output_type == 'json':
+            required_fields = output_schema.get('required_fields', [])
+            
+            if not required_fields:
+                warnings.append("Output type is 'json' but no required_fields defined")
+            
+            # Check if response_format mentions JSON
+            if 'json' not in response_format.lower() and 'JSON' not in response_format:
+                warnings.append("Output type is 'json' but response_format doesn't mention JSON format")
+            
+            # Check if each required field is mentioned in response_format
+            for field in required_fields:
+                field_name = field.get('name', '')
+                if field_name:
+                    # Check if field name appears in response_format (case-sensitive for field names in JSON)
+                    # Look for the field name in quotes or braces context
+                    if f'"{field_name}"' not in response_format and f"'{field_name}'" not in response_format and f'{{{field_name}' not in response_format:
+                        warnings.append(f"Required field '{field_name}' not found in response_format (found in schema but not in format instructions)")
+            
+            # Check if format example is provided
+            if not output_schema.get('format'):
+                warnings.append("No format example provided in output_schema (recommended for JSON)")
+        
+        # Check state updates
+        state_updates = output_schema.get('state_updates', [])
+        required_fields = output_schema.get('required_fields', [])
+        
+        # For JSON, state_updates should match required_fields
+        if output_type == 'json' and required_fields:
+            field_state_keys = {f.get('state_key') for f in required_fields if f.get('state_key')}
+            update_state_keys = {u.get('state_key') for u in state_updates if u.get('state_key')}
+            
+            if field_state_keys and update_state_keys and field_state_keys != update_state_keys:
+                warnings.append("Mismatch between required_fields and state_updates")
+        
+        # Check routing dependencies
+        routing_deps = output_schema.get('routing_dependencies', [])
+        
+        if routing_deps:
+            for dep in routing_deps:
+                state_key = dep.get('state_key')
+                if not state_key:
+                    issues.append("Routing dependency missing 'state_key'")
+                    continue
+                
+                # Check if this state_key is produced by this agent
+                if output_type == 'json':
+                    field_produces_key = any(
+                        f.get('state_key') == state_key 
+                        for f in required_fields
+                    )
+                    if not field_produces_key:
+                        warnings.append(
+                            f"Routing depends on '{state_key}' but no required_field produces it"
+                        )
+        
+        return {
+            'is_valid': len(issues) == 0,
+            'has_schema': True,
+            'output_type': output_type,
+            'issues': issues,
+            'warnings': warnings,
+            'required_fields': [f.get('name') for f in required_fields if f.get('name')],
+            'state_updates': [u.get('state_key') for u in state_updates if u.get('state_key')],
+            'routing_dependencies': routing_deps,
+            'format_example': output_schema.get('format', '')
+        }
+    
     def validate_agent_prompt(self, agent_name: str, sample_state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Validate an agent's prompt configuration
+        """Validate an agent's prompt configuration (unified structure)
         
         Args:
             agent_name: Agent to validate
@@ -319,38 +512,40 @@ class PromptManager:
             Validation results with detected variables, issues, and auto-fill status
         """
         agent_config = self.prompts.get(agent_name, {})
-        template = agent_config.get('template', '')
-        
-        detected_vars = self.get_template_variables(agent_name)
         issues = []
         warnings = []
         
-        if not template:
-            issues.append("Template is empty")
+        # Check required components for unified structure
+        required_components = ['role', 'input', 'task', 'response_format']
+        missing_components = [c for c in required_components if c not in agent_config]
         
-        if not agent_config.get('system'):
-            warnings.append("System message is missing (recommended but optional)")
+        if missing_components:
+            issues.append(f"Missing required components: {', '.join(missing_components)}")
         
-        # Check for unmatched braces
-        open_count = template.count('{')
-        close_count = template.count('}')
+        # Extract variables from input section only
+        input_text = ''
+        input_items = agent_config.get('input', [])
+        if isinstance(input_items, list):
+            input_text = '\n'.join(input_items)
+        else:
+            input_text = str(input_items)
+        
+        detected_vars = self._extract_variables_from_template(input_text)
+        
+        # Check for unmatched braces in input
+        open_count = input_text.count('{')
+        close_count = input_text.count('}')
         if open_count != close_count:
-            issues.append(f"Unmatched braces: {open_count} opening, {close_count} closing")
+            issues.append(f"Unmatched braces in input: {open_count} opening, {close_count} closing")
         
-        # Check if variables have known mappings or are in config
+        # Check if variables have known mappings
         unmapped_vars = []
         mapped_vars = []
-        config_vars = []
         
         for var in detected_vars:
-            if var in agent_config:
-                # Variable is defined in config (like guidelines, fail_criteria)
-                config_vars.append(var)
-            elif var in self.variable_mappings:
-                # Variable has a known mapping to state keys
+            if var in self.variable_mappings:
                 mapped_vars.append(var)
             else:
-                # Variable has no mapping - might be problematic
                 unmapped_vars.append(var)
         
         if unmapped_vars:
@@ -369,23 +564,38 @@ class PromptManager:
                 if value is not None:
                     auto_fillable.append(var)
                 else:
-                    # Check if it's in config
-                    if var not in agent_config:
-                        not_fillable.append(var)
+                    not_fillable.append(var)
+        
+        # Validate output schema
+        output_validation = self.validate_agent_output_schema(agent_name)
+        
+        # Check component lengths
+        if len(agent_config.get('role', '')) < 10:
+            warnings.append("Role description is very short (< 10 characters)")
+        
+        if not agent_config.get('guidelines'):
+            warnings.append("No guidelines provided (recommended)")
         
         return {
             'agent_name': agent_name,
-            'template_length': len(template),
             'detected_variables': detected_vars,
             'variable_count': len(detected_vars),
-            'mapped_variables': mapped_vars,  # Variables with known state mappings
-            'config_variables': config_vars,  # Variables defined in agent config
-            'unmapped_variables': unmapped_vars,  # Variables without mappings
-            'auto_fillable': auto_fillable,  # Variables that can be filled from sample state
-            'not_fillable': not_fillable,  # Variables that cannot be filled
-            'issues': issues,  # Critical issues that prevent usage
-            'warnings': warnings,  # Non-critical warnings
-            'is_valid': len(issues) == 0
+            'mapped_variables': mapped_vars,
+            'unmapped_variables': unmapped_vars,
+            'auto_fillable': auto_fillable,
+            'not_fillable': not_fillable,
+            'issues': issues,
+            'warnings': warnings,
+            'is_valid': len(issues) == 0 and output_validation['is_valid'],
+            'output_schema': output_validation,
+            'components': {
+                'role': bool(agent_config.get('role')),
+                'input': bool(agent_config.get('input')),
+                'task': bool(agent_config.get('task')),
+                'guidelines': bool(agent_config.get('guidelines')),
+                'additional_guidelines': bool(agent_config.get('additional_guidelines')),
+                'response_format': bool(agent_config.get('response_format'))
+            }
         }
 
 

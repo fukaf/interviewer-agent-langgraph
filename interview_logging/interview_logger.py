@@ -27,8 +27,8 @@ class InterviewLogger:
         
         # Create session-specific log file
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.log_file = self.log_dir / f"interview_{session_id}_{timestamp}.json"
-        self.text_log_file = self.log_dir / f"interview_{session_id}_{timestamp}.txt"
+        self.log_file = self.log_dir / f"interview_{session_id}.json"
+        self.text_log_file = self.log_dir / f"interview_{session_id}.txt"
         
         # Initialize log structure
         self.log_data = {
@@ -38,6 +38,8 @@ class InterviewLogger:
             "total_tokens": 0,
             "total_cost_estimate": 0.0,
             "llm_provider": None,
+            "prompt_file": None,
+            "topic_file": None,
             "events": []
         }
         
@@ -188,6 +190,16 @@ class InterviewLogger:
         """Set the LLM provider being used"""
         self.log_data["llm_provider"] = provider
         self.text_logger.info(f"LLM Provider: {provider}")
+    
+    def set_prompt_file(self, prompt_file: str):
+        """Set the prompt file being used"""
+        self.log_data["prompt_file"] = prompt_file
+        self.text_logger.info(f"Prompt File: {prompt_file}")
+    
+    def set_topic_file(self, topic_file: str):
+        """Set the topic file being used"""
+        self.log_data["topic_file"] = topic_file
+        self.text_logger.info(f"Topic File: {topic_file}")
     
     def save(self):
         """Save the complete log to JSON file"""

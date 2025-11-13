@@ -23,8 +23,8 @@ class FeedbackAgentImpl(BaseAgent):
         
         feedback_text = response.content.strip()
         
-        # Store feedback
-        state["current_question"] = feedback_text
+        # Store feedback in dedicated state field
+        state["final_feedback"] = feedback_text
         state["conversation_history"].append({
             "agent": "feedback_agent",
             "feedback": feedback_text,

@@ -31,6 +31,7 @@ class InterviewState(TypedDict):
     # Interview flow
     interview_complete: bool
     conversation_history: list[dict]
+    final_feedback: str  # Comprehensive feedback from feedback_agent
     
     # Agent and token tracking
     current_agent: str

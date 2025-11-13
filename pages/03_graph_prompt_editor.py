@@ -11,12 +11,174 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core import create_interview_graph
-from management.prompt_manager import get_prompt_manager
+from management.prompt_manager import PromptManager, get_prompt_manager
 
 st.set_page_config(page_title="Graph Prompt Editor", page_icon="🎯", layout="wide")
 
 st.title("🎯 Graph-based Prompt Editor")
 st.markdown("Click on a node in the graph to edit its prompt configuration")
+
+# Sidebar for prompt file selection
+with st.sidebar:
+    st.header("📝 Prompt File Selection")
+    
+    pm = get_prompt_manager()
+    available_prompts = PromptManager.list_available_prompts()
+    
+    if available_prompts:
+        # Get current file
+        current_file = str(pm.config_path)
+        current_filename = Path(current_file).name
+        
+        # Create file options
+        prompt_options = {p['file']: p for p in available_prompts}
+        prompt_files = list(prompt_options.keys())
+        
+        # Get current index
+        try:
+            current_index = prompt_files.index(current_filename)
+        except ValueError:
+            current_index = 0
+        
+        # Initialize session state for current file tracking
+        if 'last_loaded_file' not in st.session_state:
+            st.session_state.last_loaded_file = current_filename
+        
+        # File selector with on_change callback
+        def on_file_change():
+            selected = st.session_state.prompt_file_selector
+            if selected != st.session_state.last_loaded_file:
+                selected_info = prompt_options[selected]
+                try:
+                    pm.load_from_file(selected_info['path'])
+                    # Update session state
+                    st.session_state.last_loaded_file = selected
+                    st.session_state.current_file_name = Path(selected_info['path']).stem
+                    st.session_state.current_memo = pm.get_memo()
+                    # Clear agent selection
+                    st.session_state.clicked_node = None
+                    st.session_state.editing_agent = None
+                    st.session_state.file_name_input = st.session_state.current_file_name
+                    st.session_state.config_memo = st.session_state.current_memo
+                except Exception as e:
+                    st.error(f"❌ Failed to load: {str(e)}")
+        
+        selected_file = st.selectbox(
+            "Select prompt file to edit",
+            options=prompt_files,
+            index=current_index,
+            key="prompt_file_selector",
+            on_change=on_file_change
+        )
+        
+        # Show success message if file just changed
+        if selected_file != st.session_state.last_loaded_file:
+            st.success(f"✅ Loaded **{selected_file}**")
+        
+        # Show current file info
+        selected_info = prompt_options[selected_file]
+        
+        # Display memo in sidebar (read-only preview)
+        if selected_info['memo']:
+            st.markdown("**📌 File Description:**")
+            st.caption(selected_info['memo'])
+        
+        # Reload button
+        if st.button("� Reload Current File", use_container_width=True, 
+                     help="Reload the currently selected file from disk"):
+            try:
+                pm.load_from_file(selected_info['path'])
+                st.session_state.last_loaded_file = selected_file
+                st.session_state.current_file_name = Path(selected_info['path']).stem
+                st.session_state.current_memo = pm.get_memo()
+                st.session_state.clicked_node = None
+                st.session_state.editing_agent = None
+                st.session_state.file_name_input = st.session_state.current_file_name
+                st.session_state.config_memo = st.session_state.current_memo
+                st.success(f"✅ Reloaded **{selected_file}** from disk")
+                st.rerun()
+            except Exception as e:
+                st.error(f"❌ Failed to reload: {str(e)}")
+    else:
+        st.warning("⚠️ No YAML files found in prompts/ folder")
+        st.stop()
+    
+    st.divider()
+    
+    # Memo and file name editor in sidebar
+    st.subheader("📝 File Configuration")
+    
+    # Current file path info
+    current_path = Path(pm.config_path)
+    st.caption(f"📄 Editing: `{pm.config_path}`")
+    
+    # Initialize session state for editable fields
+    if 'current_file_name' not in st.session_state:
+        st.session_state.current_file_name = current_path.stem
+    if 'current_memo' not in st.session_state:
+        st.session_state.current_memo = pm.get_memo()
+    
+    # File name editor (using session state)
+    new_name = st.text_input(
+        "File name (without .yaml)",
+        value=st.session_state.current_file_name,
+        key="file_name_input",
+        help="Change the file name. Creates a copy with the new name.",
+        on_change=on_file_change
+    )
+    
+    # Memo editor (using session state)
+    memo_text = st.text_area(
+        "Description / Memo",
+        value=st.session_state.current_memo,
+        height=100,
+        key="config_memo",
+        help="Describe the purpose of this prompt configuration",
+        on_change=on_file_change
+    )
+    
+    # Save buttons
+    col_save_memo, col_rename = st.columns(2)
+    
+    with col_save_memo:
+        if st.button("💾 Save Memo", use_container_width=True, help="Save description to current file"):
+            pm.prompts['memo'] = memo_text
+            pm.memo = memo_text
+            pm.save_prompts(pm.prompts)
+            st.session_state.current_memo = memo_text
+            st.success("✅ Memo saved!")
+    
+    with col_rename:
+        # Show rename button only if name changed
+        if new_name != current_path.stem and new_name.strip():
+            if st.button("📝 Rename/Copy", use_container_width=True, type="primary"):
+                try:
+                    # Create new file path
+                    new_file_path = current_path.parent / f"{new_name}.yaml"
+                    
+                    # Check if file already exists
+                    if new_file_path.exists():
+                        st.error(f"❌ File `{new_name}.yaml` already exists!")
+                    else:
+                        # Save current prompts to new file
+                        import shutil
+                        shutil.copy(str(current_path), str(new_file_path))
+                        
+                        # Load the new file
+                        pm.load_from_file(str(new_file_path))
+                        
+                        # Update session state
+                        st.session_state.last_loaded_file = f"{new_name}.yaml"
+                        st.session_state.current_file_name = new_name
+                        st.session_state.current_memo = pm.get_memo()
+                        
+                        st.success(f"✅ Created copy as `{new_name}.yaml`")
+                        st.info("💡 Original file unchanged. Now editing the new copy.")
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"❌ Failed to rename: {str(e)}")
+        else:
+            st.button("📝 Rename/Copy", use_container_width=True, disabled=True, help="Enter a different name to enable")
 
 # Initialize
 @st.cache_resource
@@ -24,12 +186,6 @@ def get_graph():
     return create_interview_graph()
 
 graph = get_graph()
-
-try:
-    pm = get_prompt_manager()
-except FileNotFoundError:
-    st.error("❌ `prompts.yaml` file not found.")
-    st.stop()
 
 # Map node names to agent names in prompts.yaml
 NODE_TO_AGENT_MAP = {
@@ -219,6 +375,11 @@ with col_editor:
         
         st.info(f"📝 Editing: **{agent_name}** (node: {st.session_state.clicked_node})")
         
+        # Show all available state variables
+        if pm.variable_mappings:
+            state_vars = sorted(pm.variable_mappings.keys())
+            st.caption(f"💡 Available variables: {', '.join([f'`{{{v}}}`' for v in state_vars])}")
+        
         # Get agent info
         agent_config = pm.prompts.get(agent_name, {})
         
@@ -226,68 +387,120 @@ with col_editor:
         editor_tab1, editor_tab2, editor_tab3 = st.tabs(["✏️ Edit", "🔍 Validate", "👁️ Preview"])
         
         with editor_tab1:
-            # System message
-            st.markdown("**System Message:**")
-            system_message = st.text_area(
-                "System message (role definition)",
-                value=agent_config.get('system', ''),
+            # === Unified Structure Editing ===
+            st.info("📋 Editing agent with **unified prompt structure**")
+            
+            # 1. Role
+            st.markdown("**1️⃣ Role** (Who you are)")
+            role = st.text_area(
+                "Define the agent's persona and expertise",
+                value=agent_config.get('role', ''),
+                height=80,
+                key=f"role_{agent_name}",
+                help="The agent's role or persona"
+            )
+            
+            # 2. Input
+            st.markdown("**2️⃣ Input** (Context/Information)")
+            input_items = agent_config.get('input', [])
+            if isinstance(input_items, list):
+                input_text = '\n'.join(input_items)
+            else:
+                input_text = input_items
+            
+            input_value = st.text_area(
+                "Information provided to the agent (one per line for lists)",
+                value=input_text,
                 height=100,
-                key=f"system_{agent_name}",
-                label_visibility="collapsed"
+                key=f"input_{agent_name}",
+                help="Context and input data. Use {variables} for dynamic content"
             )
             
-            # Template
-            st.markdown("**Prompt Template:**")
-            template = st.text_area(
-                "Template with {variables}",
-                value=agent_config.get('template', ''),
-                height=250,
-                key=f"template_{agent_name}",
-                label_visibility="collapsed"
+            # 3. Task
+            st.markdown("**3️⃣ Task** (What to do)")
+            task = st.text_area(
+                "Clear objective and what the agent needs to accomplish",
+                value=agent_config.get('task', ''),
+                height=100,
+                key=f"task_{agent_name}",
+                help="The main task or objective"
             )
             
-            # Optional fields
-            if 'guidelines' in agent_config:
-                st.markdown("**Guidelines:**")
-                guidelines = st.text_area(
-                    "Guidelines (list)",
-                    value='\n'.join(agent_config.get('guidelines', [])),
-                    height=100,
-                    key=f"guidelines_{agent_name}",
-                    label_visibility="collapsed"
-                )
+            # 4. Guidelines
+            st.markdown("**4️⃣ Guidelines** (How to do it)")
+            guidelines_items = agent_config.get('guidelines', [])
+            if isinstance(guidelines_items, list):
+                guidelines_text = '\n'.join(guidelines_items)
+            else:
+                guidelines_text = guidelines_items
             
-            if 'fail_criteria' in agent_config:
-                st.markdown("**Fail Criteria:**")
-                fail_criteria = st.text_area(
-                    "Fail criteria (list)",
-                    value='\n'.join(agent_config.get('fail_criteria', [])),
-                    height=100,
-                    key=f"fail_criteria_{agent_name}",
-                    label_visibility="collapsed"
-                )
+            guidelines = st.text_area(
+                "Evaluation criteria and approach (one per line for lists)",
+                value=guidelines_text,
+                height=100,
+                key=f"guidelines_{agent_name}",
+                help="How to approach the task"
+            )
+            
+            # 5. Additional Guidelines
+            st.markdown("**5️⃣ Additional Guidelines** (Constraints/boundaries)")
+            add_guidelines_items = agent_config.get('additional_guidelines', [])
+            if isinstance(add_guidelines_items, list):
+                add_guidelines_text = '\n'.join(add_guidelines_items)
+            else:
+                add_guidelines_text = add_guidelines_items
+            
+            additional_guidelines = st.text_area(
+                "Constraints, what NOT to do (one per line for lists)",
+                value=add_guidelines_text,
+                height=80,
+                key=f"additional_guidelines_{agent_name}",
+                help="Boundaries and constraints"
+            )
+            
+            # 6. Response Format
+            st.markdown("**6️⃣ Response Format** (Output format)")
+            response_format = st.text_area(
+                "Exact format the agent should respond in",
+                value=agent_config.get('response_format', ''),
+                height=100,
+                key=f"response_format_{agent_name}",
+                help="Format instructions for the output"
+            )
             
             # Save button
             st.divider()
+            st.caption(f"💾 Changes will be saved to: `{pm.config_path}`")
+            
             col_save, col_reset = st.columns(2)
             
             with col_save:
-                if st.button("💾 Save Changes", use_container_width=True):
-                    # Update the config
+                if st.button("💾 Save Changes", use_container_width=True, type="primary"):
+                    # Update config with unified structure
                     updated_config = agent_config.copy()
-                    updated_config['system'] = system_message
-                    updated_config['template'] = template
+                    updated_config['role'] = role
                     
-                    if 'guidelines' in agent_config:
-                        updated_config['guidelines'] = [g.strip() for g in guidelines.split('\n') if g.strip()]
-                    if 'fail_criteria' in agent_config:
-                        updated_config['fail_criteria'] = [f.strip() for f in fail_criteria.split('\n') if f.strip()]
+                    # Parse input as list if multi-line
+                    input_lines = [line.strip() for line in input_value.split('\n') if line.strip()]
+                    updated_config['input'] = input_lines if len(input_lines) > 1 else input_value
                     
-                    # Save to prompts
+                    updated_config['task'] = task
+                    
+                    # Parse guidelines as list if multi-line
+                    guidelines_lines = [line.strip() for line in guidelines.split('\n') if line.strip()]
+                    updated_config['guidelines'] = guidelines_lines if len(guidelines_lines) > 1 else guidelines
+                    
+                    # Parse additional guidelines as list if multi-line
+                    add_guidelines_lines = [line.strip() for line in additional_guidelines.split('\n') if line.strip()]
+                    updated_config['additional_guidelines'] = add_guidelines_lines if len(add_guidelines_lines) > 1 else additional_guidelines
+                    
+                    updated_config['response_format'] = response_format
+                    
+                    # Save
                     pm.prompts[agent_name] = updated_config
                     pm.save_prompts(pm.prompts)
                     
-                    st.success("✅ Saved successfully!")
+                    st.success(f"✅ Saved to `{pm.config_path}`!")
                     st.rerun()
             
             with col_reset:
@@ -295,76 +508,231 @@ with col_editor:
                     st.rerun()
         
         with editor_tab2:
-            # Validation
+            # Validation for unified structure
             validation = pm.validate_agent_prompt(agent_name)
             
-            if validation['is_valid']:
-                st.success("✅ Prompt is valid")
-            else:
-                st.error("❌ Issues found:")
+            # Check if there are any issues or warnings
+            has_issues = bool(validation.get('issues'))
+            has_warnings = bool(validation.get('warnings'))
+            has_unmapped_vars = len(validation.get('unmapped_variables', [])) > 0
+            
+            # Output schema checks
+            output_schema_val = validation.get('output_schema', {})
+            has_output_issues = bool(output_schema_val.get('issues'))
+            has_output_warnings = bool(output_schema_val.get('warnings'))
+            
+            # Overall validation is problematic if there are any issues
+            is_problematic = has_issues or has_output_issues or has_unmapped_vars
+            
+            # Overall status - compact
+            st.markdown("**🎯 Validation Status:**")
+            
+            col_status, col_comp = st.columns([2, 1])
+            
+            with col_status:
+                if validation['is_valid'] and not is_problematic:
+                    st.success("✅ All checks passed!")
+                elif has_issues or has_output_issues:
+                    st.error(f"❌ {len(validation.get('issues', [])) + len(output_schema_val.get('issues', []))} critical issues found")
+                else:
+                    st.warning(f"⚠️ {len(validation.get('warnings', [])) + len(output_schema_val.get('warnings', []))} warnings found")
+            
+            with col_comp:
+                components = validation.get('components', {})
+                present = sum(1 for v in components.values() if v)
+                total = len(components)
+                st.metric("Components", f"{present}/{total}")
+            
+            # Show issues (always visible if present)
+            if validation.get('issues'):
+                st.error("**Critical Issues:**")
                 for issue in validation['issues']:
-                    st.write(f"  • {issue}")
+                    st.write(f"  🚫 {issue}")
             
+            # Show warnings (always visible if present)
             if validation.get('warnings'):
-                st.warning("⚠️ Warnings:")
+                st.warning(f"**⚠️ {len(validation['warnings'])} Warnings:**")
                 for warning in validation['warnings']:
-                    st.write(f"  • {warning}")
+                    st.caption(f"• {warning}")
             
+            # Component checklist - collapse if all valid
+            missing_required = not (components.get('role') and components.get('input') 
+                                   and components.get('task') and components.get('response_format'))
+            
+            with st.expander(f"📋 Component Checklist ({present}/{total})", expanded=missing_required):
+                col_comp1, col_comp2 = st.columns(2)
+                with col_comp1:
+                    st.write("✅ Role" if components.get('role') else "❌ Role")
+                    st.write("✅ Input" if components.get('input') else "❌ Input")
+                    st.write("✅ Task" if components.get('task') else "❌ Task")
+                
+                with col_comp2:
+                    st.write("✅ Guidelines" if components.get('guidelines') else "⚠️ Guidelines (optional)")
+                    st.write("✅ Additional Guidelines" if components.get('additional_guidelines') else "⚠️ Additional Guidelines (optional)")
+                    st.write("✅ Response Format" if components.get('response_format') else "❌ Response Format")
+            
+            # Variable analysis - collapse if all mapped
+            with st.expander(f"📊 Variable Analysis ({validation['variable_count']} variables)", 
+                           expanded=has_unmapped_vars):
+                if validation['variable_count'] == 0:
+                    st.info("No variables detected in input section")
+                else:
+                    col_v1, col_v2, col_v3 = st.columns(3)
+                    with col_v1:
+                        st.metric("Total", validation['variable_count'])
+                    with col_v2:
+                        st.metric("✅ Mapped", len(validation.get('mapped_variables', [])))
+                    with col_v3:
+                        unmapped_count = len(validation.get('unmapped_variables', []))
+                        st.metric("⚠️ Unmapped", unmapped_count)
+                    
+                    # Show variable details
+                    if validation['detected_variables']:
+                        st.caption("**Variable Mappings:**")
+                        for var in sorted(validation['detected_variables']):
+                            availability = pm.check_variable_availability(var)
+                            
+                            if availability['has_mapping']:
+                                # Build inline mapping display
+                                mappings = []
+                                for key in availability['mapping_keys']:
+                                    parts = key.split('.')
+                                    if len(parts) == 1:
+                                        mappings.append(f"`state['{key}']`")
+                                    else:
+                                        state_path = "state['" + "']['".join(parts) + "']"
+                                        mappings.append(f"`{state_path}`")
+                                mapping_str = ", ".join(mappings)
+                                st.markdown(f"✅ `{{{var}}}` → {mapping_str}")
+                            else:
+                                st.markdown(f"⚠️ `{{{var}}}` - {availability['suggestion']}")
+            
+            # Output Schema Validation - collapse if valid
             st.divider()
             
-            # Variable analysis
-            st.markdown("**📊 Variable Analysis:**")
-            
-            col_v1, col_v2, col_v3 = st.columns(3)
-            with col_v1:
-                st.metric("Total Variables", validation['variable_count'])
-            with col_v2:
-                st.metric("✅ Mapped", len(validation.get('mapped_variables', [])))
-            with col_v3:
-                st.metric("⚠️ Unmapped", len(validation.get('unmapped_variables', [])))
-            
-            # Show variables
-            if validation['detected_variables']:
-                st.markdown("**Variables:**")
-                for var in sorted(validation['detected_variables']):
-                    availability = pm.check_variable_availability(var)
-                    
-                    if availability['has_mapping']:
-                        st.write(f"✅ `{{{var}}}` - Auto-fills from state")
-                        with st.expander(f"Mapping details", expanded=False):
-                            for key in availability['mapping_keys']:
-                                parts = key.split('.')
-                                if len(parts) == 1:
-                                    st.code(f"state['{key}']", language=None)
-                                else:
-                                    state_path = "state['" + "']['".join(parts) + "']"
-                                    st.code(state_path, language=None)
-                    elif var in agent_config:
-                        st.write(f"📋 `{{{var}}}` - Defined in config")
+            if output_schema_val.get('has_schema'):
+                output_type = output_schema_val.get('output_type', 'unknown')
+                type_emoji = {'json': '📋', 'plain_text': '📝', 'markdown': '📄'}.get(output_type, '❓')
+                field_count = len(output_schema_val.get('required_fields', []))
+                
+                # Inline status display
+                if output_schema_val['is_valid']:
+                    if output_schema_val.get('warnings'):
+                        st.warning(f"⚠️ Valid {type_emoji} {output_type} with {len(output_schema_val['warnings'])} warnings")
                     else:
-                        st.write(f"⚠️ `{{{var}}}` - Manual required")
-                        with st.expander(f"Suggestions", expanded=False):
-                            st.caption(availability['suggestion'])
+                        st.success(f"✅ Valid {type_emoji} {output_type} ({field_count} fields)")
+                else:
+                    st.error(f"❌ Invalid {type_emoji} {output_type} - {len(output_schema_val.get('issues', []))} issues")
+                
+                # Show issues (if any) - always visible
+                if output_schema_val.get('issues'):
+                    st.error("**Critical Issues:**")
+                    for issue in output_schema_val['issues']:
+                        st.caption(f"🚫 {issue}")
+                
+                # Show warnings (if any) - always visible
+                if output_schema_val.get('warnings'):
+                    st.warning(f"**⚠️ {len(output_schema_val['warnings'])} Warnings:**")
+                    for warning in output_schema_val['warnings']:
+                        st.caption(f"• {warning}")
+                
+                # Collapse details if no issues
+                expand_details = bool(output_schema_val.get('issues')) or bool(output_schema_val.get('warnings'))
+                
+                with st.expander(f"📋 Schema Details ({output_type}, {field_count} fields)", 
+                               expanded=expand_details):
+                    # Compact format display (inline)
+                    if output_schema_val.get('format_example'):
+                        st.caption(f"**Format:** `{output_schema_val['format_example']}`")
+                    
+                    # Compact fields and state display (2 columns)
+                    if output_schema_val.get('required_fields') or output_schema_val.get('state_updates'):
+                        col_fields_list, col_state = st.columns(2)
+                        
+                        with col_fields_list:
+                            if output_schema_val.get('required_fields'):
+                                st.caption("**Required Fields:**")
+                                for field in output_schema_val['required_fields']:
+                                    st.caption(f"• `{field}`")
+                        
+                        with col_state:
+                            if output_schema_val.get('state_updates'):
+                                st.caption("**State Updates:**")
+                                for state_key in output_schema_val['state_updates']:
+                                    st.caption(f"• `{state_key}`")
+                    
+                    # Routing dependencies (always important - show if exists)
+                    if output_schema_val.get('routing_dependencies'):
+                        st.caption("**🔀 Routing Dependencies:**")
+                        for dep in output_schema_val['routing_dependencies']:
+                            state_key = dep.get('state_key', '')
+                            condition = dep.get('condition', '')
+                            description = dep.get('description', '')
+                            
+                            # Compact single-line format
+                            if condition:
+                                st.caption(f"• `{state_key}` → {condition}")
+                            else:
+                                st.caption(f"• `{state_key}`")
+                            if description and len(description) < 60:
+                                st.caption(f"  _{description}_")
+            else:
+                st.info("💡 **Tip:** Add `output_schema` to enable output validation")
         
         with editor_tab3:
-            # Preview
+            # Preview for unified structure
             st.markdown("**🎬 Prompt Preview:**")
-            st.code(system_message, language="text")
-            st.divider()
-            st.code(template, language="text")
-            
-            # Show what it would look like with sample data
-            st.divider()
-            st.markdown("**📝 Sample Format:**")
-            sample_vars = {}
-            for var in validation['detected_variables']:
-                sample_vars[var] = f"[{var}_value]"
             
             try:
-                sample_prompt = template.format(**sample_vars)
-                st.text_area("Formatted preview", sample_prompt, height=200, disabled=True)
-            except KeyError as e:
-                st.warning(f"Cannot preview: missing variable {e}")
+                # Build preview from components
+                preview_parts = []
+                
+                if agent_config.get('role'):
+                    preview_parts.append("# Your Role")
+                    preview_parts.append(agent_config['role'])
+                    preview_parts.append("")
+                
+                if agent_config.get('input'):
+                    preview_parts.append("# Input")
+                    input_items = agent_config['input']
+                    if isinstance(input_items, list):
+                        preview_parts.append('\n'.join(input_items))
+                    else:
+                        preview_parts.append(str(input_items))
+                    preview_parts.append("")
+                
+                if agent_config.get('task'):
+                    preview_parts.append("# Task")
+                    preview_parts.append(agent_config['task'])
+                    preview_parts.append("")
+                
+                if agent_config.get('guidelines'):
+                    preview_parts.append("# Guidelines")
+                    guidelines = agent_config['guidelines']
+                    if isinstance(guidelines, list):
+                        preview_parts.append('\n'.join(f"- {g}" for g in guidelines))
+                    else:
+                        preview_parts.append(guidelines)
+                    preview_parts.append("")
+                
+                if agent_config.get('additional_guidelines'):
+                    preview_parts.append("# Additional Guidelines")
+                    add_guidelines = agent_config['additional_guidelines']
+                    if isinstance(add_guidelines, list):
+                        preview_parts.append('\n'.join(f"- {g}" for g in add_guidelines))
+                    else:
+                        preview_parts.append(add_guidelines)
+                    preview_parts.append("")
+                
+                if agent_config.get('response_format'):
+                    preview_parts.append("# Response Format")
+                    preview_parts.append(agent_config['response_format'])
+                
+                preview_text = '\n'.join(preview_parts)
+                st.code(preview_text, language="markdown")
+                
+            except Exception as e:
+                st.error(f"Error generating preview: {e}")
     
     else:
         # No node selected or node not editable

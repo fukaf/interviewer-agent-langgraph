@@ -1,8 +1,7 @@
 """
-Base agent with common functionality
+Base agent with common functionality for System + Human message structure
 """
 from typing import Any, Dict
-from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.language_models.chat_models import BaseChatModel
 from management.prompt_manager import get_prompt_manager
 from interview_logging.interview_logger import get_logger
@@ -14,7 +13,7 @@ class BaseAgent:
     def __init__(self, agent_name: str, display_name: str):
         self.agent_name = agent_name
         self.display_name = display_name
-        self.pm = get_prompt_manager()
+        # self.pm = get_prompt_manager()
         # Don't store logger at init - get it dynamically each time
     
     @property
@@ -22,8 +21,21 @@ class BaseAgent:
         """Get logger dynamically to handle late initialization"""
         return get_logger()
     
+    @property
+    def pm(self):
+        """Get prompt manager dynamically to handle late initialization"""
+        return get_prompt_manager()
+    
+    def get_messages(self, state: Dict[str, Any], **extra_vars) -> list:
+        """Get System and Human messages from prompt manager
+        
+        Returns:
+            List of [SystemMessage, HumanMessage]
+        """
+        return self.pm.get_messages(self.agent_name, state=state, **extra_vars)
+
     def invoke_llm(self, model: BaseChatModel, state: Dict[str, Any], **extra_vars) -> Any:
-        """Invoke LLM with system message and prompt from prompt manager
+        """Invoke LLM with System and Human messages
         
         Args:
             model: LLM model to use
@@ -33,21 +45,17 @@ class BaseAgent:
         Returns:
             LLM response
         """
-        # Get system message from prompt manager
-        system_message = self.pm.get_system_message(self.agent_name)
-        
-        # Get prompt with auto-fill from state
-        prompt = self.pm.get_prompt(self.agent_name, state=state, **extra_vars)
-        
-        # Build messages list
-        messages = []
-        if system_message:
-            messages.append(SystemMessage(content=system_message))
-        messages.append(HumanMessage(content=prompt))
+        # Get messages (System + Human)
+        messages = self.get_messages(state, **extra_vars)
         
         # Log request
         if self.logger:
-            full_prompt = f"System: {system_message}\n\nHuman: {prompt}" if system_message else prompt
+            # Combine messages for logging
+            log_parts = []
+            for msg in messages:
+                msg_type = msg.__class__.__name__.replace('Message', '')
+                log_parts.append(f"{msg_type}: {msg.content}")
+            full_prompt = '\n\n'.join(log_parts)
             self.logger.log_llm_request(self.agent_name, full_prompt, str(model))
         
         # Invoke LLM
