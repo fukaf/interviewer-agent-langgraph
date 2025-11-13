@@ -9,7 +9,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 
 class PromptManager:
-    def __init__(self, config_path: str = "prompts.yaml"):
+    def __init__(self, config_path: str = "prompts/default.yaml"):
         self.config_path = Path(config_path)
         self.prompts = self._load_prompts()
         self.memo = self.prompts.pop('memo', '')  # Extract memo if exists
